@@ -1,10 +1,3 @@
-cd ~/Download-video-vip/Download-video-vip1/Download-video-vip1
-
-# Delete the old main.py
-rm -f main.py
-
-# Create the new single-file version
-cat > main.py << 'EOF'
 #!/usr/bin/env python3
 """
 KHDiamond Downloader - Single File Version
@@ -389,7 +382,3 @@ class KHDiamondCLI:
 if __name__ == "__main__":
     cli = KHDiamondCLI()
     cli.run()
-EOF
-
-# Now run it
-python main.py
