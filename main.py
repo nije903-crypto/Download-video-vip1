@@ -1,15 +1,216 @@
+cd ~/Download-video-vip/Download-video-vip1/Download-video-vip1
+
+# Delete the old main.py
+rm -f main.py
+
+# Create the new single-file version
+cat > main.py << 'EOF'
 #!/usr/bin/env python3
 """
-KHDiamond Downloader - Simple Terminal Video Downloader
+KHDiamond Downloader - Single File Version
 Author: Bread & Sonion
 """
 
 import sys
 import os
+import re
 import json
-from pathlib import Path
+import time
 import requests
+from pathlib import Path
+from urllib.parse import urlparse, urljoin
 
+# ============================================
+# URL VALIDATOR
+# ============================================
+class URLValidator:
+    ALLOWED_DOMAINS = ['khdiamond.net', 'www.khdiamond.net']
+    
+    @staticmethod
+    def is_valid(url):
+        if not url:
+            return False
+        pattern = r'^https?://(www\.)?khdiamond\.net/movies/.*$'
+        if not re.match(pattern, url, re.IGNORECASE):
+            return False
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        return domain in URLValidator.ALLOWED_DOMAINS
+
+# ============================================
+# PAGE SCRAPER
+# ============================================
+from bs4 import BeautifulSoup
+
+class PageScraper:
+    def __init__(self, session):
+        self.session = session
+
+    def get_metadata(self, url):
+        resp = self.session.get(url, timeout=15)
+        resp.raise_for_status()
+        
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        title = "Unknown Video"
+        title_tag = soup.find('h1')
+        if title_tag:
+            title = title_tag.text.strip()
+        
+        manifest_url = None
+        
+        video_tag = soup.find('video')
+        if video_tag and video_tag.get('src'):
+            manifest_url = video_tag.get('src')
+        
+        if not manifest_url:
+            source = soup.find('source')
+            if source and source.get('src'):
+                manifest_url = source.get('src')
+        
+        if not manifest_url:
+            iframes = soup.find_all('iframe')
+            for iframe in iframes:
+                src = iframe.get('src', '')
+                if 'dood' in src or 'streamtape' in src or 'mixdrop' in src:
+                    manifest_url = src
+                    break
+        
+        if not manifest_url:
+            scripts = soup.find_all('script')
+            for script in scripts:
+                if script.string:
+                    matches = re.findall(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', script.string)
+                    if matches:
+                        manifest_url = matches[0]
+                        break
+        
+        return {
+            'title': title,
+            'manifest_url': manifest_url
+        }
+
+# ============================================
+# STREAM HANDLER
+# ============================================
+import m3u8
+
+class StreamHandler:
+    def __init__(self, session):
+        self.session = session
+
+    def get_qualities(self, manifest_url):
+        try:
+            resp = self.session.get(manifest_url, timeout=10)
+            resp.raise_for_status()
+            
+            playlist = m3u8.loads(resp.text)
+            qualities = []
+            
+            if playlist.is_variant:
+                for variant in playlist.playlists:
+                    bandwidth = variant.stream_info.bandwidth
+                    if bandwidth < 500000:
+                        label = "360p"
+                    elif bandwidth < 1000000:
+                        label = "480p"
+                    elif bandwidth < 2000000:
+                        label = "720p"
+                    elif bandwidth < 4000000:
+                        label = "1080p"
+                    else:
+                        label = f"{bandwidth//1000}k"
+                    
+                    qualities.append({
+                        'label': label,
+                        'url': variant.uri,
+                        'bandwidth': bandwidth
+                    })
+            else:
+                qualities.append({
+                    'label': 'Auto',
+                    'url': manifest_url,
+                    'bandwidth': 0
+                })
+            
+            qualities.sort(key=lambda x: x.get('bandwidth', 0))
+            return qualities
+            
+        except Exception:
+            return []
+
+# ============================================
+# DOWNLOAD ENGINE
+# ============================================
+class DownloadEngine:
+    def __init__(self, session):
+        self.session = session
+
+    def format_time(self, seconds):
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            mins = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{mins}m {secs}s"
+        else:
+            hours = int(seconds // 3600)
+            mins = int((seconds % 3600) // 60)
+            return f"{hours}h {mins}m"
+
+    def download(self, url, filepath, progress_callback=None):
+        try:
+            if not url.startswith('http'):
+                base = '/'.join(url.split('/')[:-1]) + '/'
+                if not url.startswith('/'):
+                    url = base + url
+            
+            response = self.session.get(url, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+            
+            downloaded = 0
+            start_time = time.time()
+            last_update = 0
+            
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        current_time = time.time()
+                        if current_time - last_update > 0.5:
+                            elapsed = current_time - start_time
+                            speed = (downloaded / 1024) / elapsed if elapsed > 0 else 0
+                            
+                            if speed > 0 and total_size > 0:
+                                remaining = (total_size - downloaded) / (speed * 1024)
+                                eta = self.format_time(remaining)
+                            else:
+                                eta = "Calculating..."
+                            
+                            percent = (downloaded / total_size * 100) if total_size > 0 else 0
+                            downloaded_mb = downloaded / (1024 * 1024)
+                            total_mb = total_size / (1024 * 1024)
+                            
+                            if progress_callback:
+                                progress_callback(percent, speed, eta, downloaded_mb, total_mb)
+                            
+                            last_update = current_time
+            
+            return True
+            
+        except Exception:
+            return False
+
+# ============================================
+# MAIN CLI APPLICATION
+# ============================================
 class KHDiamondCLI:
     def __init__(self):
         self.session = requests.Session()
@@ -38,7 +239,7 @@ class KHDiamondCLI:
         print("\033[1;36m" + "=" * 60 + "\033[0m")
         print("\033[1;33m" + "  KHDIAMOND DOWNLOADER v1.0" + "\033[0m")
         print("\033[1;36m" + "=" * 60 + "\033[0m")
-        print("  Simple  Fast  Terminal-Based")
+        print("  Simple | Fast | Terminal-Based")
         print("  Supported: khdiamond.net/movies")
         print("\033[1;36m" + "=" * 60 + "\033[0m\n")
 
@@ -51,10 +252,6 @@ class KHDiamondCLI:
         print("\n\033[1;34mAnalyzing video...\033[0m")
         
         try:
-            from core.validator import URLValidator
-            from core.scraper import PageScraper
-            from core.stream import StreamHandler
-            
             if not URLValidator.is_valid(url):
                 print("\033[1;31mInvalid URL! Only khdiamond.net/movies allowed.\033[0m")
                 return None
@@ -116,7 +313,6 @@ class KHDiamondCLI:
         print(f"   Quality: {quality.get('label', 'Unknown')}")
         print("\n\033[1;36m" + "-" * 60 + "\033[0m")
 
-        from core.downloader import DownloadEngine
         engine = DownloadEngine(self.session)
         
         def progress_callback(percent, speed, eta, downloaded, total):
@@ -193,3 +389,7 @@ class KHDiamondCLI:
 if __name__ == "__main__":
     cli = KHDiamondCLI()
     cli.run()
+EOF
+
+# Now run it
+python main.py
