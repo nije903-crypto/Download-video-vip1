@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys, os, re, json, time, requests
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 import m3u8
 
@@ -15,31 +15,84 @@ class URLValidator:
 class PageScraper:
     def __init__(self, session):
         self.session = session
+
     def get_metadata(self, url):
         resp = self.session.get(url, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
-        title = soup.find('h1').text.strip() if soup.find('h1') else "Unknown Video"
+
+        # 1. Extract Title
+        title = "Unknown Video"
+        title_tag = soup.find('h1')
+        if title_tag:
+            title = title_tag.text.strip()
+
         manifest_url = None
-        video = soup.find('video')
-        if video and video.get('src'):
-            manifest_url = video.get('src')
+
+        # 2. Check for Video/Source tags
+        video_tag = soup.find('video')
+        if video_tag and video_tag.get('src'):
+            manifest_url = video_tag.get('src')
+
         if not manifest_url:
             source = soup.find('source')
             if source and source.get('src'):
                 manifest_url = source.get('src')
+
+        # 3. Check for Scripts containing .m3u8
         if not manifest_url:
-            for script in soup.find_all('script'):
+            scripts = soup.find_all('script')
+            for script in scripts:
                 if script.string:
                     matches = re.findall(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', script.string)
                     if matches:
                         manifest_url = matches[0]
                         break
+
+        # 4. **[NEW]** Extract iframe sources and try to find manifest inside them
+        if not manifest_url:
+            iframes = soup.find_all('iframe')
+            for iframe in iframes:
+                src = iframe.get('src')
+                if src:
+                    # Make absolute URL if relative
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        src = urljoin(url, src)
+
+                    # Try to fetch the iframe page and search for manifest
+                    try:
+                        iframe_resp = self.session.get(src, timeout=10)
+                        iframe_soup = BeautifulSoup(iframe_resp.text, 'html.parser')
+                        # Search for video/source in iframe
+                        iframe_video = iframe_soup.find('video')
+                        if iframe_video and iframe_video.get('src'):
+                            manifest_url = iframe_video.get('src')
+                            break
+                        iframe_source = iframe_soup.find('source')
+                        if iframe_source and iframe_source.get('src'):
+                            manifest_url = iframe_source.get('src')
+                            break
+                        # Search for m3u8 in iframe scripts
+                        iframe_scripts = iframe_soup.find_all('script')
+                        for script in iframe_scripts:
+                            if script.string:
+                                matches = re.findall(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', script.string)
+                                if matches:
+                                    manifest_url = matches[0]
+                                    break
+                        if manifest_url:
+                            break
+                    except:
+                        pass
+
         return {'title': title, 'manifest_url': manifest_url}
 
 class StreamHandler:
     def __init__(self, session):
         self.session = session
+
     def get_qualities(self, manifest_url):
         try:
             resp = self.session.get(manifest_url, timeout=10)
@@ -61,8 +114,10 @@ class StreamHandler:
 class DownloadEngine:
     def __init__(self, session):
         self.session = session
+
     def format_time(self, s):
         return f"{int(s//60)}m {int(s%60)}s" if s >= 60 else f"{s:.0f}s"
+
     def download(self, url, filepath, progress_callback=None):
         try:
             resp = self.session.get(url, stream=True, timeout=30)
@@ -91,7 +146,9 @@ class DownloadEngine:
 class App:
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
         self.save_path = Path.home() / 'Downloads'
         self.save_path.mkdir(exist_ok=True)
 
@@ -115,7 +172,7 @@ class App:
                 scraper = PageScraper(self.session)
                 meta = scraper.get_metadata(url)
                 if not meta or not meta['manifest_url']:
-                    print("\033[1;31mNo manifest found.\033[0m")
+                    print("\033[1;31mNo manifest found. The video might be DRM-protected or require login.\033[0m")
                     input("Press Enter...")
                     continue
                 handler = StreamHandler(self.session)
